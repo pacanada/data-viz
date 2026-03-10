@@ -565,18 +565,35 @@ with viz_tabs[2]:
         mode = st.selectbox("Style", ["lines", "markers", "lines+markers"])
 
     if x and y1 and y2:
-        d = df_f[[x, y1, y2]].dropna(subset=[x]).copy()
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=d[x], y=d[y1], name=y1, mode=mode, yaxis="y1"))
-        fig.add_trace(go.Scatter(x=d[x], y=d[y2], name=y2, mode=mode, yaxis="y2"))
+        # Avoid passing duplicate column names to Plotly (narwhals requires unique columns).
+        # If x == y1 (same column selected), avoid selecting it twice.
+        cols = [x]
+        if y1 != x:
+            cols.append(y1)
+        if y2 != x and y2 != y1:
+            cols.append(y2)
 
-        fig.update_layout(
+        d = df_f[cols].dropna(subset=[x]).copy()
+        fig = go.Figure()
+
+        y1_series = d[x] if y1 == x else d[y1]
+        fig.add_trace(go.Scatter(x=d[x], y=y1_series, name=y1, mode=mode, yaxis="y1"))
+
+        if y2 != y1:
+            y2_series = d[x] if y2 == x else d[y2]
+            fig.add_trace(go.Scatter(x=d[x], y=y2_series, name=y2, mode=mode, yaxis="y2"))
+
+        layout = dict(
             height=560,
             xaxis=dict(title=x),
             yaxis=dict(title=y1),
-            yaxis2=dict(title=y2, overlaying="y", side="right"),
             hovermode="x unified",
         )
+
+        if y2 != y1:
+            layout["yaxis2"] = dict(title=y2, overlaying="y", side="right")
+
+        fig.update_layout(**layout)
         st.plotly_chart(fig, width="stretch")
 
 # Scatter

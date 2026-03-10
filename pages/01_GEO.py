@@ -84,6 +84,8 @@ selected_numeric = st.multiselect(
     key="geo_selected_numeric",
     #default=numeric_columns[:3]   # sensible default
 )
+# Ensure the selected list is unique to avoid duplicate columns in downstream DataFrames
+selected_numeric = list(dict.fromkeys(selected_numeric))
 
 if "geo_display_mode" not in st.session_state:
     st.session_state["geo_display_mode"] = "Polyline"

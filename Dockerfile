@@ -13,7 +13,7 @@ FROM build AS final
 # Copy the code
 WORKDIR $APP_DIR
 # Copy the rest of the application code
-COPY entrypoint.py entrypoint.py
+COPY 00_Intro.py 00_Intro.py
 COPY pages pages
 COPY .streamlit .streamlit
 COPY .streamlit/config.toml .streamlit/config.toml
@@ -28,4 +28,4 @@ COPY --from=build $APP_DIR $APP_DIR
 
 
 EXPOSE 8501
-CMD ["uv", "run", "python", "-m", "streamlit", "run", "entrypoint.py"]
+CMD ["uv", "run", "python", "-m", "streamlit", "run", "00_Intro.py"]
