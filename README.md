@@ -9,7 +9,9 @@ Very simple (and opinionated) Streamlit dashboard to explore and visualize data 
 
 # Run
 Run the following command to build and run the Interactive Data Visualization Dashboard using Docker:
-```docker build -f Dockerfile -t dashboard  https://github.com/pacanada/data-viz.git#main  && docker run -it -p 8501:8501 dashboard```
+```cmd
+docker build -f Dockerfile -t dashboard https://github.com/pacanada/data-viz.git#main && docker run -it -p 8501:8501 dashboard
+```
 
 # Examples
 ## Preview
