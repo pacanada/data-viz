@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>{{ title }}</title>
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+  <style>
+    body { font-family: Arial, sans-serif; margin: 16px; }
+    .container { display: flex; gap: 16px; }
+    #mapContainer { flex: 1.1; }
+    #map { height: 820px; width: 100%; border-radius: 10px; }
+    #chartsColumn { flex: 1; max-height: 820px; overflow-y: auto; }
+    .chart-wrapper { margin-bottom: 16px; height: 250px; background: #fff; border-radius: 10px; padding: 8px; }
+    #timestampDisplay { margin-top: 10px; font-weight: bold; }
+  </style>
+</head>
+<body>
+
+  <div class="container">
+    <div id="mapContainer">
+      <div id="map"></div>
+    </div>
+
+    <div id="chartsColumn">
+      <!-- charts get injected here -->
+    </div>
+  </div>
+
+  <div id="timestampDisplay"></div>
+
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@1.1.0"></script>
+
+  <script>
+    // Data injected by Jinja
+    const data = {{ data_json | tojson }};
+    const numericCols = {{ numeric_columns_json | tojson }};
+
+
+    if (!data.length) {
+      document.body.innerHTML = "<p>No data</p>";
+    }
+
+    // ---- Map init ----
+    const map = L.map('map').setView([data[0].lat, data[0].lng], 6);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+
+    // Polyline track (no markers)
+    const polyCoords = data.map(d => [d.lat, d.lng]);
+    const route = L.polyline(polyCoords, { color: 'blue', weight: 4, opacity: 0.85 }).addTo(map);
+    map.fitBounds(route.getBounds(), { padding: [20, 20] });
+
+    // "Current position" marker
+    const currentMarker = L.circleMarker(polyCoords[0], { radius: 7, color: "#111", fillOpacity: 0.9 }).addTo(map);
+
+    // ---- Common state ----
+    let currentIndex = 0;
+    const labels = data.map(d => d.timestamp);
+
+    function setIndex(idx) {
+      idx = Math.max(0, Math.min(data.length - 1, idx));
+      currentIndex = idx;
+
+      const d = data[idx];
+      currentMarker.setLatLng([d.lat, d.lng]);
+
+      // update timestamp label
+      document.getElementById('timestampDisplay').innerText =
+        `Selected timestamp: ${d.timestamp} (idx=${idx})`;
+
+      // update vertical line on all charts
+      charts.forEach(ch => {
+        ch.options.plugins.annotation.annotations.cursor.xMin = d.timestamp;
+        ch.options.plugins.annotation.annotations.cursor.xMax = d.timestamp;
+        ch.update('none'); // faster update
+      });
+    }
+
+    // ---- Charts (dynamic) ----
+    const chartsColumn = document.getElementById("chartsColumn");
+    const charts = [];
+
+    function createChart(metric) {
+      // wrapper + canvas
+      const wrapper = document.createElement("div");
+      wrapper.className = "chart-wrapper";
+      const canvas = document.createElement("canvas");
+      wrapper.appendChild(canvas);
+      chartsColumn.appendChild(wrapper);
+
+      const series = data.map(d => d[metric]);
+
+      const chart = new Chart(canvas.getContext('2d'), {
+        type: 'line',
+        data: {
+          labels: labels,
+          datasets: [{
+            label: metric,
+            data: series,
+            borderWidth: 2,
+            tension: 0.15,
+            pointRadius: 0,
+            pointHoverRadius: 6,
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: { display: false },
+            title: { display: true, text: metric },
+            annotation: {
+              annotations: {
+                cursor: {
+                  type: 'line',
+                  xMin: labels[0],
+                  xMax: labels[0],
+                  borderWidth: 2,
+                  borderDash: [4, 4],
+                }
+              }
+            }
+          },
+          scales: {
+            x: {
+              ticks: { autoSkip: true, maxTicksLimit: 12 }
+            }
+          },
+          onClick: function(evt) {
+            // Find nearest point index (Chart.js gives us elements under click)
+            const points = chart.getElementsAtEventForMode(evt, 'nearest', { intersect: false }, true);
+            if (!points.length) return;
+            const idx = points[0].index;
+            setIndex(idx);
+          }
+        }
+      });
+
+      charts.push(chart);
+    }
+
+    // Create charts for all numeric columns
+    numericCols.forEach(createChart);
+
+    // initialize
+    setIndex(0);
+  </script>
+</body>
+</html>
