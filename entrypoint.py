@@ -48,7 +48,7 @@ def coerce_datetimes(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
 def numeric_cols(df: pd.DataFrame) -> List[str]:
     return [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
 
-def categorical_cols(df: pd.DataFrame) -> List[str]:
+def categorical_cols(df: pd.DataFrame, include_numeric: bool = False) -> List[str]:
     out = []
     for c in df.columns:
         dtype = df[c].dtype
@@ -58,6 +58,13 @@ def categorical_cols(df: pd.DataFrame) -> List[str]:
 
         elif isinstance(dtype, pd.CategoricalDtype):
             out.append(c)
+
+        elif pd.api.types.is_integer_dtype(dtype) or pd.api.types.is_float_dtype(dtype):
+            nunique = df[c].nunique(dropna=True)
+            # Default: only treat low-cardinality numeric as categorical.
+            # When include_numeric is True, allow any numeric column.
+            if include_numeric or nunique <= 200:
+                out.append(c)
 
         elif isinstance(dtype, object):
             nunique = df[c].nunique(dropna=True)
@@ -76,7 +83,22 @@ def apply_filters(df: pd.DataFrame, filters_state: dict) -> pd.DataFrame:
         out = out[out[col].between(lo, hi)]
     # Categorical selections
     for col, selected in filters_state.get("cat_selected", {}).items():
-        if selected is not None and len(selected) > 0:
+        if selected is None or len(selected) == 0:
+            continue
+
+        # If the underlying column is numeric, the selector values may be strings.
+        # Convert back to the right dtype so `.isin()` works correctly.
+        if pd.api.types.is_numeric_dtype(out[col].dtype):
+            try:
+                converted = pd.to_numeric(selected, errors="coerce")
+                converted = converted[~pd.isna(converted)]
+                if len(converted) > 0:
+                    out = out[out[col].isin(converted)]
+                else:
+                    out = out.iloc[0:0]
+            except Exception:
+                out = out.iloc[0:0]
+        else:
             out = out[out[col].isin(selected)]
     # Datetime range
     for col, (start, end) in filters_state.get("dt_ranges", {}).items():
@@ -146,12 +168,27 @@ with st.sidebar:
             df = px.data.iris()
         elif demo == "Tips":
             df = px.data.tips()
+        st.session_state["data"] = df
+    elif "data" in st.session_state:
+        # Preserve dataset across pages / reruns
+        df = st.session_state["data"]
 
     st.divider()
     st.header("2) Settings")
-    max_rows = st.slider("Max rows to use (downsample for speed)", 1_000, 300_000, 50_000, step=1_000)
-    seed = st.number_input("Downsample seed", min_value=0, value=42, step=1)
-    downsample = st.checkbox("Downsample if dataset is larger than max rows", value=True)
+    max_rows = st.slider(
+        "Max rows to use (downsample for speed)",
+        1_000,
+        300_000,
+        50_000,
+        step=1_000,
+        key="settings_max_rows",
+    )
+    seed = st.number_input("Downsample seed", min_value=0, value=42, step=1, key="settings_seed")
+    downsample = st.checkbox(
+        "Downsample if dataset is larger than max rows",
+        value=True,
+        key="settings_downsample",
+    )
 
 if df is None:
     st.info("Upload a dataset (CSV/Parquet/JSON) or select a demo dataset from the sidebar.")
@@ -169,8 +206,23 @@ with st.sidebar:
         "Columns to parse as datetime",
         options=list(df.columns),
         default=dt_candidates,
+        key="parse_datetime_columns",
+    )
+    stored_order = st.session_state.get("order_by_col", "(none)")
+    order_options = ["(none)"] + list(df.columns)
+    order_index = order_options.index(stored_order) if stored_order in order_options else 0
+    order_by_col = st.selectbox(
+        "Order rows by",
+        options=order_options,
+        index=order_index,
+        key="order_by_column",
     )
 df = coerce_datetimes(df, dt_cols_selected)
+
+# Keep latest dataset in session state so other pages can reuse it
+st.session_state["data"] = df
+# Persist ordering preference for later use
+st.session_state["order_by_col"] = None if order_by_col == "(none)" else order_by_col
 
 # ---------------------------
 # Quick overview
@@ -200,60 +252,170 @@ st.subheader("Filters (on-demand)")
 
 num_cols = numeric_cols(df)
 st.session_state["numeric_columns"] = num_cols
-cat_cols = categorical_cols(df)
+
+# Ensure the numeric-as-categorical toggle stays enabled when the stored
+# categorical selections include numeric columns (so the dropdown doesn't lose them).
+stored_filters = st.session_state.get("filters_state", {})
+stored_selected_cat = stored_filters.get("selected_cat_cols", [])
+stored_toggle = st.session_state.get("filters_include_numeric_as_categorical", False)
+if not stored_toggle:
+    for c in stored_selected_cat:
+        if c in df.columns and pd.api.types.is_numeric_dtype(df[c]):
+            stored_toggle = True
+            break
+
+if "filters_include_numeric_as_categorical" not in st.session_state:
+    st.session_state["filters_include_numeric_as_categorical"] = stored_toggle
+
+include_numeric_as_cat = st.checkbox(
+    "Treat numeric columns as categorical (e.g., IDs)",
+    value=st.session_state["filters_include_numeric_as_categorical"],
+    key="filters_include_numeric_as_categorical",
+)
+
+cat_cols = categorical_cols(df, include_numeric=include_numeric_as_cat)
+st.session_state["categorical_columns"] = cat_cols
+
 dt_cols = [c for c in df.columns if pd.api.types.is_datetime64_any_dtype(df[c])]
 txt_cols = text_cols(df)
 
-filters_state = {"num_ranges": {}, "cat_selected": {}, "dt_ranges": {}, "text_contains": {}, "null_mode": "keep", "null_cols": []}
+# Reuse previously applied filters across pages
+filters_state = st.session_state.get(
+    "filters_state",
+    {
+        "num_ranges": {},
+        "cat_selected": {},
+        "dt_ranges": {},
+        "text_contains": {},
+        "null_mode": "keep",
+        "null_cols": [],
+        "selected_num_cols": [],
+        "selected_cat_cols": [],
+        "selected_dt_cols": [],
+        "selected_txt_cols": [],
+    },
+)
 
 f1, f2, f3, f4 = st.columns(4, gap="large")
 
 with f1:
     st.markdown("**Numeric**")
-    for col in st.multiselect("Pick numeric columns", num_cols):
+    default_num = [c for c in filters_state.get("selected_num_cols", []) if c in num_cols]
+    selected_num_cols = st.multiselect(
+        "Pick numeric columns",
+        num_cols,
+        default=default_num,
+        key="filters_numeric_columns",
+    )
+    for col in selected_num_cols:
         s = df[col].dropna()
         if len(s) == 0:
             continue
 
         lo0, hi0 = float(s.min()), float(s.max())
+        saved_range = filters_state.get("num_ranges", {}).get(col)
+        if saved_range and len(saved_range) == 2:
+            lo_def, hi_def = saved_range
+            # Clamp defaults to current range in case data changed
+            lo_def = max(lo0, min(lo_def, hi0))
+            hi_def = max(lo0, min(hi_def, hi0))
+        else:
+            lo_def, hi_def = lo0, hi0
 
         # Handle constant columns safely
         if lo0 == hi0:
             st.info(f"{col} has a constant value: {lo0}")
             filters_state["num_ranges"][col] = (lo0, hi0)
         else:
-            lo, hi = st.slider(col, lo0, hi0, (lo0, hi0))
+            lo, hi = st.slider(
+                col,
+                lo0,
+                hi0,
+                (lo_def, hi_def),
+                key=f"filter_num_{col}",
+            )
             filters_state["num_ranges"][col] = (lo, hi)
 
 with f2:
     st.markdown("**Categorical**")
-    for col in st.multiselect("Pick categorical columns", cat_cols):
+    default_cat = [c for c in filters_state.get("selected_cat_cols", []) if c in cat_cols]
+    selected_cat_cols = st.multiselect(
+        "Pick categorical columns",
+        cat_cols,
+        default=default_cat,
+        key="filters_categorical_columns",
+    )
+    for col in selected_cat_cols:
         vals = df[col].dropna().astype(str).unique().tolist()
         vals = sorted(vals)[:5000]
-        chosen = st.multiselect(col, vals, default=[])
+        saved = filters_state.get("cat_selected", {}).get(col, [])
+        chosen = st.multiselect(
+            col,
+            vals,
+            default=[v for v in saved if v in vals],
+            key=f"filter_cat_{col}",
+        )
         if chosen:
             filters_state["cat_selected"][col] = chosen
 
 with f3:
     st.markdown("**Datetime**")
-    for col in st.multiselect("Pick datetime columns", dt_cols, default=dt_cols[:1]):
+    selected_dt_cols = st.multiselect(
+        "Pick datetime columns",
+        dt_cols,
+        default=filters_state.get("selected_dt_cols", dt_cols[:1]),
+        key="filters_datetime_columns",
+    )
+    for col in selected_dt_cols:
         s = df[col].dropna()
         if len(s) == 0:
             continue
         start0, end0 = s.min(), s.max()
-        start = st.date_input(f"{col} start", value=start0.date())
-        end = st.date_input(f"{col} end", value=end0.date())
+        saved_range = filters_state.get("dt_ranges", {}).get(col)
+        if saved_range and len(saved_range) == 2:
+            start_def, end_def = saved_range
+            if pd.isna(start_def) or pd.isna(end_def):
+                start_def, end_def = start0, end0
+        else:
+            start_def, end_def = start0, end0
+
+        start = st.date_input(
+            f"{col} start",
+            value=start_def.date() if hasattr(start_def, 'date') else start_def,
+            key=f"filter_dt_start_{col}",
+        )
+        end = st.date_input(
+            f"{col} end",
+            value=end_def.date() if hasattr(end_def, 'date') else end_def,
+            key=f"filter_dt_end_{col}",
+        )
         filters_state["dt_ranges"][col] = (start, end)
 
 with f4:
     st.markdown("**Text search**")
-    for col in st.multiselect("Pick text columns", txt_cols, default=txt_cols[:1]):
-        pattern = st.text_input(f"{col} contains", value="")
+    selected_txt_cols = st.multiselect(
+        "Pick text columns",
+        txt_cols,
+        default=filters_state.get("selected_txt_cols", txt_cols[:1]),
+        key="filters_text_columns",
+    )
+    for col in selected_txt_cols:
+        saved_pattern = filters_state.get("text_contains", {}).get(col, "")
+        pattern = st.text_input(
+            f"{col} contains",
+            value=saved_pattern,
+            key=f"filter_text_{col}",
+        )
         if pattern:
             filters_state["text_contains"][col] = pattern
 
 with st.expander("Null handling", expanded=False):
-    null_cols_pick = st.multiselect("Columns to consider for null rules", options=list(df.columns), default=[])
+    null_cols_pick = st.multiselect(
+        "Columns to consider for null rules",
+        options=list(df.columns),
+        default=filters_state.get("null_cols", []),
+        key="filters_null_columns",
+    )
     null_mode = st.selectbox(
         "Null rule",
         ["keep", "drop_rows_any", "drop_rows_all"],
@@ -262,11 +424,32 @@ with st.expander("Null handling", expanded=False):
             "drop_rows_any": "Drop rows with ANY null in selected columns",
             "drop_rows_all": "Drop rows with ALL null in selected columns",
         }[x],
+        index=["keep", "drop_rows_any", "drop_rows_all"].index(filters_state.get("null_mode", "keep")),
+        key="filters_null_mode",
     )
     filters_state["null_cols"] = null_cols_pick
     filters_state["null_mode"] = null_mode
 
+# Persist filters so other pages can reuse them
+filters_state["selected_num_cols"] = selected_num_cols
+filters_state["selected_cat_cols"] = selected_cat_cols
+filters_state["selected_dt_cols"] = selected_dt_cols
+filters_state["selected_txt_cols"] = selected_txt_cols
+st.session_state["filters_state"] = filters_state
+
 df_f = apply_filters(df, filters_state)
+
+# Apply optional ordering (allows choosing the sort column rather than hardcoding timestamp)
+order_by = st.session_state.get("order_by_col")
+if order_by and order_by in df_f.columns:
+    try:
+        df_f = df_f.sort_values(order_by).reset_index(drop=True)
+    except Exception:
+        # If sorting fails (mixed types), keep current ordering
+        pass
+
+# Persist filtered dataset too
+st.session_state["filtered_data"] = df_f
 
 st.caption(f"Filtered rows: {len(df_f):,} / {len(df):,}")
 st.dataframe(df_f.head(200), width="stretch")

@@ -8,8 +8,32 @@
   <style>
     body { font-family: Arial, sans-serif; margin: 16px; }
     .container { display: flex; gap: 16px; }
-    #mapContainer { flex: 1.1; }
+    #mapContainer { flex: 1.1; position: relative; }
     #map { height: 820px; width: 100%; border-radius: 10px; }
+    #mapLegend {
+      position: absolute;
+      top: 10px;
+      right: 12px;
+      background: rgba(255,255,255,0.92);
+      border-radius: 8px;
+      padding: 10px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.15);
+      font-size: 12px;
+      max-width: 220px;
+      max-height: 260px;
+      overflow: auto;
+      z-index: 1000;
+    }
+    .legend-swatch {
+      display: inline-block;
+      width: 14px;
+      height: 14px;
+      margin-right: 6px;
+      vertical-align: middle;
+      border-radius: 3px;
+      border: 1px solid rgba(0,0,0,0.25);
+    }
+    .legend-row { margin-bottom: 6px; }
     #chartsColumn { flex: 1; max-height: 820px; overflow-y: auto; }
     .chart-wrapper { margin-bottom: 16px; height: 250px; background: #fff; border-radius: 10px; padding: 8px; }
     #timestampDisplay { margin-top: 10px; font-weight: bold; }
@@ -20,6 +44,7 @@
   <div class="container">
     <div id="mapContainer">
       <div id="map"></div>
+      <div id="mapLegend"></div>
     </div>
 
     <div id="chartsColumn">
@@ -37,7 +62,8 @@
     // Data injected by Jinja
     const data = {{ data_json | tojson }};
     const numericCols = {{ numeric_columns_json | tojson }};
-
+    const colorConfig = {{ color_config_json | tojson }};
+    const displayMode = {{ display_mode | tojson }};
 
     if (!data.length) {
       document.body.innerHTML = "<p>No data</p>";
@@ -49,17 +75,192 @@
       attribution: '&copy; OpenStreetMap contributors'
     }).addTo(map);
 
-    // Polyline track (no markers)
     const polyCoords = data.map(d => [d.lat, d.lng]);
-    const route = L.polyline(polyCoords, { color: 'blue', weight: 4, opacity: 0.85 }).addTo(map);
-    map.fitBounds(route.getBounds(), { padding: [20, 20] });
+    const bounds = L.latLngBounds(polyCoords);
+    map.fitBounds(bounds, { padding: [20, 20] });
 
-    // "Current position" marker
-    const currentMarker = L.circleMarker(polyCoords[0], { radius: 7, color: "#111", fillOpacity: 0.9 }).addTo(map);
+    const palette = [
+      "#1f77b4",
+      "#ff7f0e",
+      "#2ca02c",
+      "#d62728",
+      "#9467bd",
+      "#8c564b",
+      "#e377c2",
+      "#7f7f7f",
+      "#bcbd22",
+      "#17becf",
+    ];
+
+    function getNumericColor(v) {
+      if (v === null || v === undefined || isNaN(v)) return "#888";
+      const min = colorConfig.min;
+      const max = colorConfig.max;
+      if (min === max) return "#4682b4";
+      const t = Math.max(0, Math.min(1, (v - min) / (max - min)));
+      const r = Math.round(255 * t);
+      const b = Math.round(255 * (1 - t));
+      return `rgb(${r},0,${b})`;
+    }
+
+    const categoryColorMap = {};
+    if (colorConfig.mode === "categorical" && Array.isArray(colorConfig.categories)) {
+      colorConfig.categories.forEach((cat, idx) => {
+        categoryColorMap[cat] = palette[idx % palette.length];
+      });
+    }
+
+    function getColorForValue(v) {
+      if (!colorConfig || colorConfig.mode === "none") return "#1f77b4";
+      if (colorConfig.mode === "numeric") return getNumericColor(Number(v));
+      if (colorConfig.mode === "categorical") return categoryColorMap[String(v)] || "#888";
+      return "#1f77b4";
+    }
+
+    // Map layers (polyline vs points)
+    const segments = [];
+    const pointMarkers = [];
+
+    function createPolyline() {
+      for (let i = 0; i < data.length - 1; i++) {
+        const start = data[i];
+        const end = data[i + 1];
+        const color = getColorForValue(start.color_val);
+        const segment = L.polyline(
+          [
+            [start.lat, start.lng],
+            [end.lat, end.lng],
+          ],
+          { color, weight: 4, opacity: 0.85 }
+        ).addTo(map);
+        segments.push(segment);
+      }
+    }
+
+    function makeTooltipText(d) {
+      const parts = [
+        `timestamp: ${d.timestamp}`,
+        `lat: ${d.lat}`,
+        `lng: ${d.lng}`,
+      ];
+      numericCols.forEach(col => {
+        if (d[col] !== undefined) {
+          parts.push(`${col}: ${d[col]}`);
+        }
+      });
+      return parts.join('<br/>');
+    }
+
+    function createPoints() {
+      data.forEach((d, idx) => {
+        const color = getColorForValue(d.color_val);
+        const marker = L.circleMarker([d.lat, d.lng], {
+          radius: 6,
+          weight: 1,
+          color: color,
+          fillColor: color,
+          fillOpacity: 0.9,
+        }).addTo(map);
+
+        marker.bindTooltip(makeTooltipText(d), { direction: 'top', offset: [0, -10] });
+        marker.on('click', () => setIndex(idx));
+        pointMarkers.push(marker);
+      });
+    }
+
+    function setActiveMode(mode) {
+      // clear existing
+      segments.forEach(s => map.removeLayer(s));
+      pointMarkers.forEach(m => map.removeLayer(m));
+      segments.length = 0;
+      pointMarkers.length = 0;
+
+      if (mode === 'Points') {
+        createPoints();
+      } else {
+        createPolyline();
+      }
+
+      renderLegend();
+    }
+
+    // "Current position" marker (always above other layers)
+    const currentMarker = L.circleMarker(polyCoords[0], {
+      radius: 7,
+      weight: 2,
+      color: "#111",
+      fillColor: getColorForValue(data[0].color_val),
+      fillOpacity: 0.9,
+    }).addTo(map);
+    currentMarker.bringToFront();
+    currentMarker.bindTooltip(makeTooltipText(data[0]), { direction: 'top', offset: [0, -12] });
 
     // ---- Common state ----
     let currentIndex = 0;
     const labels = data.map(d => d.timestamp);
+
+    function renderLegend() {
+      const legend = document.getElementById('mapLegend');
+      legend.innerHTML = '';
+
+      if (!colorConfig || colorConfig.mode === 'none') {
+        legend.style.display = 'none';
+        return;
+      }
+
+      legend.style.display = 'block';
+      const title = document.createElement('div');
+      title.style.fontWeight = '700';
+      title.style.marginBottom = '6px';
+      title.textContent = 'Color legend';
+      legend.appendChild(title);
+
+      if (colorConfig.mode === 'numeric') {
+        const min = colorConfig.min;
+        const max = colorConfig.max;
+
+        const gradient = document.createElement('div');
+        gradient.style.height = '16px';
+        gradient.style.borderRadius = '4px';
+        gradient.style.background = 'linear-gradient(to right, rgb(0,0,255), rgb(255,0,0))';
+        gradient.style.marginBottom = '6px';
+        legend.appendChild(gradient);
+
+        const labels = document.createElement('div');
+        labels.style.display = 'flex';
+        labels.style.justifyContent = 'space-between';
+        labels.innerHTML = `<span>${min}</span><span>${max}</span>`;
+        legend.appendChild(labels);
+      }
+
+      if (colorConfig.mode === 'categorical') {
+        const categories = colorConfig.categories || [];
+        categories.slice(0, 50).forEach(cat => {
+          const row = document.createElement('div');
+          row.className = 'legend-row';
+
+          const swatch = document.createElement('span');
+          swatch.className = 'legend-swatch';
+          swatch.style.backgroundColor = categoryColorMap[String(cat)] || '#888';
+          row.appendChild(swatch);
+
+          const label = document.createElement('span');
+          label.textContent = String(cat);
+          row.appendChild(label);
+
+          legend.appendChild(row);
+        });
+
+        if (categories.length > 50) {
+          const more = document.createElement('div');
+          more.style.fontSize = '11px';
+          more.style.marginTop = '6px';
+          more.style.opacity = '0.7';
+          more.textContent = `Showing first 50 of ${categories.length} categories`;
+          legend.appendChild(more);
+        }
+      }
+    }
 
     function setIndex(idx) {
       idx = Math.max(0, Math.min(data.length - 1, idx));
@@ -67,6 +268,9 @@
 
       const d = data[idx];
       currentMarker.setLatLng([d.lat, d.lng]);
+      currentMarker.setStyle({ color: "#111", fillColor: getColorForValue(d.color_val) });
+      currentMarker.bringToFront();
+      currentMarker.setTooltipContent(makeTooltipText(d));
 
       // update timestamp label
       document.getElementById('timestampDisplay').innerText =
@@ -147,6 +351,7 @@
     numericCols.forEach(createChart);
 
     // initialize
+    setActiveMode(displayMode);
     setIndex(0);
   </script>
 </body>
